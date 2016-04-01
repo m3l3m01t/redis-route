@@ -62,6 +62,14 @@ typedef struct domain_entry {
 } domain_entry_t;
 
 struct domain_entry *domains = NULL;
+
+struct in_addr_entry { 
+  struct in_addr addr;
+  UT_hash_handle hh;
+};
+
+struct in_addr_entry *addrs = NULL;
+
 #if 0
 //struct a_record *addrs = NULL;
 
@@ -236,13 +244,19 @@ void delDomainCb(redisAsyncContext *c, void *r, void *priv) {
 
     for (i = 0; i < reply->elements; i++) {
       struct in_addr addr;
+      struct in_addr_entry *paddr = NULL;
 
       if (inet_pton (AF_INET, reply->element[i]->str, &addr) != 1) {
         fprintf(stderr, "invalid ip address %s\n", reply->element[i]->str);
         continue;
       }
-      fprintf(stdout, "ipset del %s %s\n", entry->table, reply->element[i]->str);
-      ipset_in_addr_op(entry->table, &addr, IPSET_CMD_DEL);
+
+      HASH_FIND_INT(addrs, &addr.s_addr, paddr);
+      if (paddr) {
+        fprintf(stdout, "%s: -%s\n", entry->table, reply->element[i]->str);
+        ipset_in_addr_op(entry->table, &addr, IPSET_CMD_DEL);
+        HASH_DEL(addrs, paddr);
+      }
     }
     fflush(stdout);
   }
@@ -291,12 +305,23 @@ void addDomainCb(redisAsyncContext *c, void *r, void *priv) {
 
     for (i = 0; i < reply->elements; i++) {
       struct in_addr addr;
+      struct in_addr_entry *paddr = NULL;
 
       if (inet_pton (AF_INET, reply->element[i]->str, &addr) != 1) {
         fprintf(stderr, "invalid ip address %s\n", reply->element[i]->str);
         continue;
       }
-      ipset_in_addr_op(table, &addr, IPSET_CMD_ADD);
+
+      HASH_FIND_INT(addrs, &addr.s_addr, paddr);
+      if (paddr == NULL) {
+        fprintf(stdout, "%s: +%s\n", table, reply->element[i]->str); 
+        ipset_in_addr_op(table, &addr, IPSET_CMD_ADD);
+
+        paddr = calloc(1, sizeof(struct in_addr_entry));
+        paddr->addr = addr;
+
+        HASH_ADD_INT(addrs, addr, paddr);
+      }
     }
   }
   fflush(stdout);
@@ -426,7 +451,7 @@ void dnameCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
     fprintf(stdout,"domain %s is in table %s, pattern %s\n",
         val, entry->table, entry->domain);
 
-    redisAsyncCommand((redisAsyncContext *)priv, addDomainCb, entry, "SMEMBERS %s", val);
+    redisAsyncCommand((redisAsyncContext *)priv, addDomainCb, entry->table, "SMEMBERS %s", val);
   }
 }
 
