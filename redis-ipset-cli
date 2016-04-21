@@ -1,0 +1,45 @@
+#!/bin/sh
+
+OP="ADD"
+IPSET="GFW"
+DOMAIN=
+REDIS_HOST=localhost
+
+while getopts "haxg:H:" opt; do
+	case $opt in
+		a)
+			OP="ADD"
+			;;
+		x)
+			OP="DEL"
+			;;
+		g)
+			IPSET=$OPTARG
+			;;
+		H)
+			REDIS_HOST=$OPTARG
+			;;
+		?|h)
+			echo "$0 [-a]|-x [-g GFW] [-H REDIS_SERVER] domain ..."
+			echo -e "\t -a  add domain to IPSET"
+			echo -e "\t -x  remove domain from IPSET"
+			echo -e "\t -g  IPSET, default 'GFW'"
+			echo -e "\t -H  redis server address, default localhost"
+			exit 1
+			;;
+	esac
+done
+
+shift $((OPTIND-1))
+
+(
+	while [ "x$1" != "x" ]; do
+		DOMAIN=$(echo $1 |sed 's/\([^\.]\)$/\1./')
+		echo "publish IPSET:$OP \"$IPSET $DOMAIN\"" 
+		shift
+	done
+) | redis-cli -h $REDIS_HOST
+
+
+# vim: set ts=2 sw=2:
+

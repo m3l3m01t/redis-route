@@ -56,8 +56,8 @@ void _redisPrintReply(FILE *fp, const char *prefix, const redisReply *reply)
 typedef struct domain_entry { 
   char domain[DOMAIN_SIZE];
   char table[IPSET_SIZE];
+  uint32_t domain_len;
   uint32_t flags;
-//  UT_array *addrs;
   UT_hash_handle hh;
 } domain_entry_t;
 
@@ -70,25 +70,14 @@ struct in_addr_entry {
 
 struct in_addr_entry *addrs = NULL;
 
-#if 0
-//struct a_record *addrs = NULL;
-
-int hipset_test_addr(const domain_entry_t *domain, const in_addr *addr) {
-  in_addr *p = NULL;
-  while ((p=(in_addr *)utarray_next(domain->addrs, p))) {
-    if (*p == *addr) {
-      return 1;
-    }
-  }
-  return 0;
-}
-#endif
 
 domain_entry_t *domain_entry_create(const char *domain, const char *table) {
     domain_entry_t *entry = calloc (1, sizeof(domain_entry_t));
 
     strncpy (entry->domain, domain, DOMAIN_SIZE);
     strncpy (entry->table, table, IPSET_SIZE);
+
+    entry->domain_len = strlen(domain);
 
     return entry;
 }
@@ -232,7 +221,6 @@ void hdelIpsetCb(redisAsyncContext *c,void *r, void *priv) {
   free(priv);
 }
 
-
 void delDomainCb(redisAsyncContext *c, void *r, void *priv) {
   redisReply *reply = r;
   domain_entry_t *entry = priv;
@@ -351,7 +339,6 @@ void delSubDomainCb(redisAsyncContext *c, void *r, void *priv) {
   redisReply *reply = r;
   domain_entry_t *entry = priv;
 
-  //fprintf(stdout, "delSubDomainCb %s\n", (const char *)priv);
   if (reply == NULL) return;
 
   if (reply->type == REDIS_REPLY_ARRAY) {
@@ -366,11 +353,7 @@ void delSubDomainCb(redisAsyncContext *c, void *r, void *priv) {
               "SMEMBERS %s", dname);
     }
   }
-  //_redisPrintReply(stdout, "  ", reply);
-  //freeReplyObject(reply);
 }
-
-//static const UT_icd ut_inaddr_icd _UNUSED_ = {sizeof(in_addr),NULL,NULL,NULL};
 
 void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
   char *set = strtok(val, " ");
@@ -387,10 +370,7 @@ void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
 
     strncpy (entry->domain, dname, DOMAIN_SIZE);
     strncpy (entry->table, set, IPSET_SIZE);
-
-#if 0
-    utarray_new(entry->addrs, &ut_intaddr_icd);
-#endif
+    entry->domain_len = strlen(entry->domain);
 
     HASH_ADD_STR(domains, domain, entry);
     entry->flags = 1;
@@ -410,6 +390,7 @@ void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
       entry = calloc (1, sizeof(domain_entry_t));
       strncpy (entry->domain, dname, DOMAIN_SIZE);
       strncpy (entry->table, set, IPSET_SIZE);
+      entry->domain_len = strlen(entry->domain);
 
       HASH_ADD_STR(domains, domain, entry);
     }
@@ -425,25 +406,27 @@ void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
 }
 
 domain_entry_t * ipsetMatchDomain(const char *domain) {
+  int len;
   domain_entry_t *entry, *tmp;
+
+  len = strlen(domain);
+
   HASH_ITER(hh,domains,entry,tmp) {
-    char *ptr;
-    if ((ptr = strstr(domain, entry->domain))) {
-      if (ptr == domain || *(ptr-1) == '.') {
+    int n = len - entry->domain_len;
+
+    if (n < 0)
+      continue;
+
+    if (strncmp(entry->domain, domain + n, entry->domain_len))
+      continue;
+
+    if (!n || domain[n-1] == '.') {
         return entry;
-      }
     }
   }
 
   return NULL;
 }
-
-/*
-   struct redisCbParam {
-   redisAsyncContext *c;
-   int cmd;
-   };
-   */
 
 void dnameCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
   domain_entry_t *entry = ipsetMatchDomain(val);
@@ -471,8 +454,9 @@ subscribe_t _subscribes[] = {
 
 void subCb(redisAsyncContext *c, void *r, void *priv) {
   redisReply *reply = r;
-  if (reply == NULL) return;
-  //_redisPrintReply(stderr, "  ", reply);
+
+  if (reply == NULL)
+    return;
   if ( reply->type == REDIS_REPLY_ARRAY && reply->elements == 4 ) {
     subscribe_t *sbs = &_subscribes[0];
 
@@ -494,8 +478,6 @@ void subCb(redisAsyncContext *c, void *r, void *priv) {
     }
     fprintf(stderr,"Cannot find handler\n"); 
   }
-
-  //freeReplyObject(reply);
 }
 
 void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
@@ -507,6 +489,7 @@ void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
       domain_entry_t *entry = calloc (1, sizeof(domain_entry_t));
       strncpy (entry->domain, reply->element[i]->str, DOMAIN_SIZE);
       strncpy (entry->table, reply->element[i+1]->str, IPSET_SIZE);
+      entry->domain_len = strlen(entry->domain);
 
       fprintf(stdout,"hash add %s => %s\n", entry->domain, entry->table);
       HASH_ADD_STR(domains, domain, entry);
@@ -569,7 +552,6 @@ int main (int argc, char **argv) {
     }
   }
 
-  //c = redisAsyncConnect("127.0.0.1", 6379);
   if (redis_host) {
     fprintf(stdout, "connect to host%s:%d\n", redis_host, redis_port);
     fflush(stdout);
@@ -587,7 +569,6 @@ int main (int argc, char **argv) {
     return 1;
   }
 
-  //c2 = redisAsyncConnectUnix(redis_sock);
   if (redis_host) {
     printf("connect to host %s:%d\n", redis_host, redis_port);
     fflush(stdout);
@@ -610,17 +591,7 @@ int main (int argc, char **argv) {
   redisAsyncSetConnectCallback(c2,connectCb);
   redisAsyncSetDisconnectCallback(c,disconnectCb);
   redisAsyncSetDisconnectCallback(c2,disconnectCb);
-  /*
-   * domain -> 'ipaddr list'
-   * IPSET:ADD -> 'setname domain'
-   * IPSET:POP -> 'setname domain'
-   * IPSET:NEW -> 'setname policy'
-   *
-   * SET:SETNAME -> 'domain list'
-   */
   redisAsyncCommand(c, loadIpsetCb, c2, "HGETALL IPSET");
-
-  //redisAsyncCommand(c, subCb, c2, "SUBSCRIBE DNAME");
 
   event_base_dispatch(base);
   return 0;
