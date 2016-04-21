@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <libgen.h>
+#include <dbus/dbus.h>
 
 #include <uthash.h>
 #include <hiredis.h>
@@ -70,16 +71,95 @@ struct in_addr_entry {
 
 struct in_addr_entry *addrs = NULL;
 
+typedef enum {DNSMASQ_DISABLE, DNSMASQ_ENABLE, DNSMASQ_ONLY} dnsmasq_opt_t;
+
+dnsmasq_opt_t dnsmasq_support = DNSMASQ_DISABLE;
+DBusConnection *dbus_conn = NULL;
+char *nameserver = "127.0.0.1#1054";
+
+#define DNSMASQ_PATH "/uk/org/thekelleys/dnsmasq"
+#define DNSMASQ_SERVICE "uk.org.thekelleys.dnsmasq"
+#define DNSMASQ_DBUS_NAME DNSMASQ_SERVICE
+
+/* returns NULL or error message, may fail silently if dbus daemon not yet up. */
+int dbus_init_dnsmasq(void) {
+  DBusError dbus_error;
+  DBusConnection *connection = NULL;
+  DBusMessage *message;
+
+  dbus_error_init (&dbus_error);
+  if (!(connection = dbus_bus_get (DBUS_BUS_SYSTEM, &dbus_error))) {
+    fprintf(stderr, "Connection failed:%s\n", dbus_error.message);
+    dbus_error_free(&dbus_error);
+    return -1;
+  }
+
+  //dbus_bus_request_name(connection, DNSMASQ_SERVICE, DBUS_NAME_FLAG_REPLACE_EXISTING,
+  //    &dbus_error);
+
+  dbus_error_init (&dbus_error);
+  dbus_bus_request_name (connection, DNSMASQ_SERVICE, 0, &dbus_error);
+  if (dbus_error_is_set (&dbus_error)) {
+    fprintf(stderr, "Request dnsmasq dbus name failed:%s\n", dbus_error.message);
+    dbus_error_free(&dbus_error);
+    return -1;
+  }
+
+  dbus_conn = connection;
+
+  if ((message = dbus_message_new_signal(DNSMASQ_PATH, DNSMASQ_DBUS_NAME, "Up")))
+  {
+    dbus_connection_send(connection, message, NULL);
+    dbus_message_unref(message);
+  }
+
+  dbus_error_free(&dbus_error);
+  return 0;
+}
+
+void dbus_set_domain_server(const char *domain, int set) {
+  DBusMessage *msg, *reply;
+  DBusMessageIter iter;
+  DBusError err;
+  char str[256];
+
+  snprintf(str, sizeof(str) - 1, "/%s/%s", domain, set ? nameserver : "");
+
+  msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
+      DNSMASQ_PATH, 
+      DNSMASQ_DBUS_NAME, 
+      "SetDomainServers");
+
+  dbus_message_iter_init_append(msg, &iter);
+  dbus_message_iter_append_fixed_array(&iter, DBUS_TYPE_STRING, str, 1);
+
+   // send message and get a handle for a reply
+  dbus_error_init(&err);
+  reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 1, &err);
+  if (dbus_error_is_set (&err)) {
+    fprintf(stderr, "SetDomainServers %s failed\n", str);
+    dbus_error_free(&err);
+    return;
+  } else {
+    dbus_message_unref(reply);
+  }
+
+  dbus_connection_flush(dbus_conn);
+
+  // free message
+  dbus_message_unref(msg);
+  dbus_error_free(&err);
+}
 
 domain_entry_t *domain_entry_create(const char *domain, const char *table) {
-    domain_entry_t *entry = calloc (1, sizeof(domain_entry_t));
+  domain_entry_t *entry = calloc (1, sizeof(domain_entry_t));
 
-    strncpy (entry->domain, domain, DOMAIN_SIZE);
-    strncpy (entry->table, table, IPSET_SIZE);
+  strncpy (entry->domain, domain, DOMAIN_SIZE);
+  strncpy (entry->table, table, IPSET_SIZE);
 
-    entry->domain_len = strlen(domain);
+  entry->domain_len = strlen(domain);
 
-    return entry;
+  return entry;
 }
 
 int ipset_in_addr_op(const char *table, const struct in_addr *sa, int op) {
@@ -110,7 +190,7 @@ int ipset_in_addr_op(const char *table, const struct in_addr *sa, int op) {
   nested[1] = mnl_attr_nest_start(nlh, IPSET_ATTR_IP);
 
   mnl_attr_put(nlh, IPSET_ATTR_IPADDR_IPV4 | NLA_F_NET_BYTEORDER,
-          sizeof(struct in_addr), sa);
+      sizeof(struct in_addr), sa);
 
   mnl_attr_nest_end(nlh, nested[1]);
   mnl_attr_nest_end(nlh, nested[0]);
@@ -132,76 +212,76 @@ close:
 }
 
 /*
-int ipset_ip_op(const char *setname, const char *ipaddr, int af, int op) {
-  struct nlmsghdr *nlh;
-  struct nfgenmsg *nfg;
-  struct mnl_socket *mnl;
-  struct nlattr *nested[2];
+   int ipset_ip_op(const char *setname, const char *ipaddr, int af, int op) {
+   struct nlmsghdr *nlh;
+   struct nfgenmsg *nfg;
+   struct mnl_socket *mnl;
+   struct nlattr *nested[2];
 
-  char buffer[256];
-  int rc = 0;
-  union {
-    struct in_addr sa;
-    struct in6_addr sa6;
-  } inaddr;
+   char buffer[256];
+   int rc = 0;
+   union {
+   struct in_addr sa;
+   struct in6_addr sa6;
+   } inaddr;
 
-  fprintf(stdout, "ipset %s %s %s\n", op == IPSET_CMD_ADD ? "ADD" : "DEL",  setname, ipaddr); 
-  fflush(stdout);
+   fprintf(stdout, "ipset %s %s %s\n", op == IPSET_CMD_ADD ? "ADD" : "DEL",  setname, ipaddr); 
+   fflush(stdout);
 
-  if (strlen(setname) >= IPSET_MAXNAMELEN) {
-    errno = ENAMETOOLONG;
-    return -1;
-  }
+   if (strlen(setname) >= IPSET_MAXNAMELEN) {
+   errno = ENAMETOOLONG;
+   return -1;
+   }
 
-  if (af != AF_INET && af != AF_INET6) {
-    errno = EAFNOSUPPORT;
-    return -1;
-  }
+   if (af != AF_INET && af != AF_INET6) {
+   errno = EAFNOSUPPORT;
+   return -1;
+   }
 
-  if (af == AF_INET) {
-    inet_pton(af, ipaddr, &inaddr.sa);
-  } else {
-    inet_pton(af, ipaddr, &inaddr.sa6);
-  }
+   if (af == AF_INET) {
+   inet_pton(af, ipaddr, &inaddr.sa);
+   } else {
+   inet_pton(af, ipaddr, &inaddr.sa6);
+   }
 
-  nlh = mnl_nlmsg_put_header(buffer);
-  nlh->nlmsg_type = op | (NFNL_SUBSYS_IPSET << 8);
-  nlh->nlmsg_flags = NLM_F_REQUEST;
+   nlh = mnl_nlmsg_put_header(buffer);
+   nlh->nlmsg_type = op | (NFNL_SUBSYS_IPSET << 8);
+   nlh->nlmsg_flags = NLM_F_REQUEST;
 
-  nfg = mnl_nlmsg_put_extra_header(nlh, sizeof(struct nfgenmsg));
-  nfg->nfgen_family = AF_INET;
-  nfg->version = NFNETLINK_V0;
-  nfg->res_id = htons(0);
-  mnl_attr_put_u8(nlh, IPSET_ATTR_PROTOCOL, IPSET_PROTOCOL);
-  mnl_attr_put(nlh, IPSET_ATTR_SETNAME, strlen(setname) + 1, setname);
-  nested[0] = mnl_attr_nest_start(nlh, IPSET_ATTR_DATA);
-  nested[1] = mnl_attr_nest_start(nlh, IPSET_ATTR_IP);
+   nfg = mnl_nlmsg_put_extra_header(nlh, sizeof(struct nfgenmsg));
+   nfg->nfgen_family = AF_INET;
+   nfg->version = NFNETLINK_V0;
+   nfg->res_id = htons(0);
+   mnl_attr_put_u8(nlh, IPSET_ATTR_PROTOCOL, IPSET_PROTOCOL);
+   mnl_attr_put(nlh, IPSET_ATTR_SETNAME, strlen(setname) + 1, setname);
+   nested[0] = mnl_attr_nest_start(nlh, IPSET_ATTR_DATA);
+   nested[1] = mnl_attr_nest_start(nlh, IPSET_ATTR_IP);
 
-  if (af == AF_INET) {
-    mnl_attr_put(nlh, IPSET_ATTR_IPADDR_IPV4 | NLA_F_NET_BYTEORDER,
-        sizeof(struct in_addr), &inaddr);
-  } else {
-    mnl_attr_put(nlh, IPSET_ATTR_IPADDR_IPV6 | NLA_F_NET_BYTEORDER,
-        sizeof(struct in6_addr), &inaddr);
-  }
+   if (af == AF_INET) {
+   mnl_attr_put(nlh, IPSET_ATTR_IPADDR_IPV4 | NLA_F_NET_BYTEORDER,
+   sizeof(struct in_addr), &inaddr);
+   } else {
+   mnl_attr_put(nlh, IPSET_ATTR_IPADDR_IPV6 | NLA_F_NET_BYTEORDER,
+   sizeof(struct in6_addr), &inaddr);
+   }
 
-  mnl_attr_nest_end(nlh, nested[1]);
-  mnl_attr_nest_end(nlh, nested[0]);
+   mnl_attr_nest_end(nlh, nested[1]);
+   mnl_attr_nest_end(nlh, nested[0]);
 
-  mnl = mnl_socket_open(NETLINK_NETFILTER);
-  if (mnl <= 0)
-    return -1;
-  if (mnl_socket_bind(mnl, 0, MNL_SOCKET_AUTOPID) < 0) {
-    rc = -1;
-    goto close;
-  }
-  if (mnl_socket_sendto(mnl, nlh, nlh->nlmsg_len) < 0) {
-    rc = -1;
-    goto close;
-  }
+   mnl = mnl_socket_open(NETLINK_NETFILTER);
+   if (mnl <= 0)
+   return -1;
+   if (mnl_socket_bind(mnl, 0, MNL_SOCKET_AUTOPID) < 0) {
+   rc = -1;
+   goto close;
+   }
+   if (mnl_socket_sendto(mnl, nlh, nlh->nlmsg_len) < 0) {
+   rc = -1;
+   goto close;
+   }
 close:
-  mnl_socket_close(mnl);
-  return rc;
+mnl_socket_close(mnl);
+return rc;
 }
 */
 
@@ -253,30 +333,30 @@ void delDomainCb(redisAsyncContext *c, void *r, void *priv) {
 }
 
 /*
-void delDnameCb(redisAsyncContext *c, void *r, void *priv) {
-  redisReply *reply = r;
-  const char *dname = priv;
+   void delDnameCb(redisAsyncContext *c, void *r, void *priv) {
+   redisReply *reply = r;
+   const char *dname = priv;
 
-  if (reply && (reply->type == REDIS_REPLY_ARRAY)) {
-    int i;
+   if (reply && (reply->type == REDIS_REPLY_ARRAY)) {
+   int i;
 
-    fprintf(stdout, "del %s (%lu ip addrs)\n", dname, reply->elements); 
-    fflush(stdout);
+   fprintf(stdout, "del %s (%lu ip addrs)\n", dname, reply->elements); 
+   fflush(stdout);
 
-    for (i = 0; i < reply->elements; i++) {
-      struct in_addr addr;
+   for (i = 0; i < reply->elements; i++) {
+   struct in_addr addr;
 
-      if (inet_pton (AF_INET, reply->element[i]->str, &addr) != 1) {
-        fprintf(stderr, "invalid ip address %s\n", reply->element[i]->str);
-        continue;
-      }
-      ipset_in_addr_op(table, &addr, IPSET_CMD_DEL);
-    }
-  }
-  redisAsyncCommand(c, NULL, NULL, "DEL %s", dname);
-  free (priv);
-}
-*/
+   if (inet_pton (AF_INET, reply->element[i]->str, &addr) != 1) {
+   fprintf(stderr, "invalid ip address %s\n", reply->element[i]->str);
+   continue;
+   }
+   ipset_in_addr_op(table, &addr, IPSET_CMD_DEL);
+   }
+   }
+   redisAsyncCommand(c, NULL, NULL, "DEL %s", dname);
+   free (priv);
+   }
+   */
 
 void addDomainCb(redisAsyncContext *c, void *r, void *priv) {
   redisReply *reply = r;
@@ -320,7 +400,6 @@ void addSubDomainCb(redisAsyncContext *c, void *r, void *priv) {
   char *table = priv;
   redisReply *reply = r;
 
-  //fprintf(stdout, "addSubDomainCb %s\n", table);
   if (reply == NULL) return;
 
   if (reply->type == REDIS_REPLY_ARRAY) {
@@ -350,7 +429,7 @@ void delSubDomainCb(redisAsyncContext *c, void *r, void *priv) {
       fflush(stdout);
 
       redisAsyncCommand(c, delDomainCb, domain_entry_create(dname, entry->table),
-              "SMEMBERS %s", dname);
+          "SMEMBERS %s", dname);
     }
   }
 }
@@ -379,8 +458,12 @@ void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
     fflush(stdout);
     //        redisAsyncCommand(c, NULL, NULL, "SADD IPSET_%s %s", set, dname);
     redisAsyncCommand(c, NULL, NULL, "HSET IPSET %s %s", dname, set);
-    redisAsyncCommand(c, addDomainCb, entry->table, "SMEMBERS %s", dname);
-    redisAsyncCommand(c, addSubDomainCb, entry->table, "KEYS *.%s", dname);
+    if (dnsmasq_support != DNSMASQ_DISABLE)
+      dbus_set_domain_server(dname, 1);
+    if (dnsmasq_support != DNSMASQ_ONLY) {
+      redisAsyncCommand(c, addDomainCb, entry->table, "SMEMBERS %s", dname);
+      redisAsyncCommand(c, addSubDomainCb, entry->table, "KEYS *.%s", dname);
+    }
   } else if (strcmp(channel, "IPSET:DEL") == 0) {
     domain_entry_t *entry = NULL;
 
@@ -397,8 +480,12 @@ void ipsetCb(redisAsyncContext *c, const char *channel, char *val, void *priv) {
 
     fprintf(stdout, "remove %s:%s from %s\n",entry->domain, entry->table, set);
 
-    redisAsyncCommand(c, delSubDomainCb, entry, "KEYS *.%s", dname);
-    redisAsyncCommand(c, delDomainCb, entry, "SMEMBERS %s", dname);
+    if (dnsmasq_support != DNSMASQ_DISABLE)
+      dbus_set_domain_server(dname, 0);
+    if (dnsmasq_support != DNSMASQ_ONLY) {
+      redisAsyncCommand(c, delSubDomainCb, entry, "KEYS *.%s", dname);
+      redisAsyncCommand(c, delDomainCb, entry, "SMEMBERS %s", dname);
+    }
     fflush(stdout);
   } else if (strcmp(channel, "IPSET:NEW") == 0) {
 
@@ -421,7 +508,7 @@ domain_entry_t * ipsetMatchDomain(const char *domain) {
       continue;
 
     if (!n || domain[n-1] == '.') {
-        return entry;
+      return entry;
     }
   }
 
@@ -495,12 +582,19 @@ void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
       HASH_ADD_STR(domains, domain, entry);
       entry->flags = 1;
 
-      redisAsyncCommand(c, addDomainCb, entry->table, "SMEMBERS %s", entry->domain);
-      redisAsyncCommand(c, addSubDomainCb, entry->table, "KEYS *.%s", entry->domain);
+      if (dnsmasq_support != DNSMASQ_DISABLE)
+        dbus_set_domain_server(entry->domain, 1);
+      if (dnsmasq_support != DNSMASQ_ONLY) {
+        redisAsyncCommand(c, addDomainCb, entry->table, "SMEMBERS %s", entry->domain);
+        redisAsyncCommand(c, addSubDomainCb, entry->table, "KEYS *.%s", entry->domain);
+      }
     }
   }
 
-  redisAsyncCommand((redisAsyncContext *)priv, subCb, c,  "PSUBSCRIBE DNAME IPSET:*");
+  redisAsyncCommand((redisAsyncContext *)priv, subCb, c, 
+      dnsmasq_support == DNSMASQ_ONLY ?
+      "PSUBSCRIBE IPSET:*" : "PSUBSCRIBE DNAME IPSET:*"
+      );
 }
 
 void connectCb(const redisAsyncContext *c, int status) {
@@ -526,14 +620,25 @@ const char *redis_sock = "/var/run/redis/redis.sock";
 const char *redis_host=NULL;
 
 int main (int argc, char **argv) {
-  int opt;
+  int opt, longindex;
+
+  struct option longopts[] = {
+    {"dnsmasq", 0, 0, 'D'}, 
+    {"dnsmasq-only", 0, 0, 'd'}, 
+    {"help", 0, 0, '?'}, 
+    {"socket", required_argument, 0, 's'}, 
+    {"host", required_argument, 0, 'h'}, 
+    {"port", required_argument, 0, 'p'}, 
+    {"nameserver", required_argument, 0, 'N'},
+    {0, 0, 0, 0},
+  };
 
   redisAsyncContext *c, *c2;
   struct event_base *base = event_base_new();
 
   signal(SIGPIPE, SIG_IGN);
 
-  while ((opt = getopt(argc, argv, "h:s:p:")) != -1) {
+  while ((opt = getopt_long(argc, argv, "NDdh:s:p:", longopts, &longindex)) != -1) {
     switch (opt) {
       case 'h':
         redis_host = optarg;
@@ -546,10 +651,23 @@ int main (int argc, char **argv) {
       case 'p':
         redis_port = atoi(optarg);
         break;
+      case 'D':
+        dnsmasq_support = DNSMASQ_ENABLE;
+        break;
+      case 'd':
+        dnsmasq_support = DNSMASQ_ONLY;
+        break;
+      case 'N':
+        nameserver = strdup(optarg);
+        break;
       default:
         fprintf(stderr, "Usage: %s [-s socket] | [-h host -p redis_port]", basename(argv[0]));
         exit (1);
     }
+  }
+
+  if (dnsmasq_support != DNSMASQ_DISABLE) {
+    dbus_init_dnsmasq();
   }
 
   if (redis_host) {
