@@ -119,36 +119,50 @@ int dbus_init_dnsmasq(void) {
 
 void dbus_set_domain_server(const char *domain, int set) {
   DBusMessage *msg, *reply;
-  DBusMessageIter iter;
+  DBusMessageIter iter, sub;
   DBusError err;
-  char str[256];
 
-  snprintf(str, sizeof(str) - 1, "/%s/%s", domain, set ? nameserver : "");
+  char *p;
+  char *str = malloc(256);
 
+  snprintf(str, 255, "/%s", domain);
+
+  p = str;
+  while (*(p + 1)) p++;
+  *p++ = '/';
+  if (set)
+    strcpy(p, nameserver);
+  
   msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
       DNSMASQ_PATH, 
       DNSMASQ_DBUS_NAME, 
       "SetDomainServers");
 
   dbus_message_iter_init_append(msg, &iter);
-  dbus_message_iter_append_fixed_array(&iter, DBUS_TYPE_STRING, str, 1);
+  dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, DBUS_TYPE_STRING_AS_STRING, &sub);
+
+  dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &str);
+  dbus_message_iter_close_container(&iter, &sub);
+
+  fprintf(stdout,"set dnsmasq %s\n", str);
+  fflush(stdout);
 
    // send message and get a handle for a reply
   dbus_error_init(&err);
-  reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 1, &err);
+  reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 2000, &err);
   if (dbus_error_is_set (&err)) {
-    fprintf(stderr, "SetDomainServers %s failed\n", str);
-    dbus_error_free(&err);
-    return;
-  } else {
-    dbus_message_unref(reply);
+    fprintf(stderr, "SetDomainServers %s failed\n",err.message);
   }
 
   dbus_connection_flush(dbus_conn);
 
   // free message
+  if (reply)
+    dbus_message_unref(reply);
   dbus_message_unref(msg);
   dbus_error_free(&err);
+
+  free(str);
 }
 
 domain_entry_t *domain_entry_create(const char *domain, const char *table) {
@@ -578,7 +592,7 @@ void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
       strncpy (entry->table, reply->element[i+1]->str, IPSET_SIZE);
       entry->domain_len = strlen(entry->domain);
 
-      fprintf(stdout,"hash add %s => %s\n", entry->domain, entry->table);
+      //fprintf(stdout,"hash add %s => %s\n", entry->domain, entry->table);
       HASH_ADD_STR(domains, domain, entry);
       entry->flags = 1;
 
@@ -629,7 +643,7 @@ int main (int argc, char **argv) {
     {"socket", required_argument, 0, 's'}, 
     {"host", required_argument, 0, 'h'}, 
     {"port", required_argument, 0, 'p'}, 
-    {"nameserver", required_argument, 0, 'N'},
+    {"ns", required_argument, 0, 'N'},
     {0, 0, 0, 0},
   };
 
@@ -638,9 +652,9 @@ int main (int argc, char **argv) {
 
   signal(SIGPIPE, SIG_IGN);
 
-  while ((opt = getopt_long(argc, argv, "NDdh:s:p:", longopts, &longindex)) != -1) {
+  while ((opt = getopt_long(argc, argv, "NDdhH:s:p:", longopts, &longindex)) != -1) {
     switch (opt) {
-      case 'h':
+      case 'H':
         redis_host = optarg;
         while (*redis_host==' ')
           redis_host++;
@@ -660,8 +674,24 @@ int main (int argc, char **argv) {
       case 'N':
         nameserver = strdup(optarg);
         break;
+      case 'h':
+      case '?':
       default:
-        fprintf(stderr, "Usage: %s [-s socket] | [-h host -p redis_port]", basename(argv[0]));
+        fprintf(stderr,
+            "Usage: %s [-s socket] | [-H host -p redis_port] [-N nameserver] [-D|-d]\n"
+            "   -s,\n"
+            "       redis sock\n"
+            "   -H,\n"
+            "       redis host ip\n"
+            "   -p,\n"
+            "       redis port\n"
+            "   -N|--ns nameserver,\n"
+            "       nameserver for matched domains\n"
+            "   -D|--dnsmasq,\n"
+            "       update dnsmasq via DBus\n"
+            "   -d|--dnsmasq-only,\n"
+            "       update dnsmasq via DBus, without updating ipset\n",
+            basename(argv[0]));
         exit (1);
     }
   }
