@@ -117,22 +117,64 @@ int dbus_init_dnsmasq(void) {
   return 0;
 }
 
+void dbus_set_domain_server_ex(redisReply *redis_reply, int set)
+{
+  int i = 0, j = 0;
+  char *str, buf[256];
+
+  DBusMessage *msg, *reply;
+  DBusMessageIter iter, sub;
+  DBusError err;
+
+  while (i < redis_reply->elements) {
+    msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
+        DNSMASQ_PATH, 
+        DNSMASQ_DBUS_NAME, 
+        "SetDomainServers");
+
+    dbus_message_iter_init_append(msg, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, DBUS_TYPE_STRING_AS_STRING, &sub);
+
+    str = &buf[0];
+
+    for (j = 0; (j < 200) && ((i + j) < redis_reply->elements); j += 2) {
+      snprintf(str, sizeof(buf) - 1, "/%s/%s", redis_reply->element[i + j]->str, set ? nameserver : "");
+      fprintf(stdout,"load %s\n", str);
+      dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &str);
+    }
+
+    i += j;
+
+    dbus_message_iter_close_container(&iter, &sub);
+
+     // send message and get a handle for a reply
+    dbus_error_init(&err);
+    reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 10000, &err);
+    if (dbus_error_is_set (&err)) {
+      fprintf(stderr, "SetDomainServers %s failed\n",err.message);
+    }
+
+    fflush(stdout);
+
+    dbus_connection_flush(dbus_conn);
+
+  // free message
+    if (reply)
+      dbus_message_unref(reply);
+    dbus_message_unref(msg);
+    dbus_error_free(&err);
+  }
+}
+
 void dbus_set_domain_server(const char *domain, int set) {
   DBusMessage *msg, *reply;
   DBusMessageIter iter, sub;
   DBusError err;
 
-  char *p;
   char *str = malloc(256);
 
-  snprintf(str, 255, "/%s", domain);
+  snprintf(str, 255, "/%s/%s", domain, set ? nameserver : "");
 
-  p = str;
-  while (*(p + 1)) p++;
-  *p++ = '/';
-  if (set)
-    strcpy(p, nameserver);
-  
   msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
       DNSMASQ_PATH, 
       DNSMASQ_DBUS_NAME, 
@@ -586,8 +628,13 @@ void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
   if (reply == NULL) return;
   if ( reply->type == REDIS_REPLY_ARRAY && reply->elements > 0 ) {
     int i;
+    if (dnsmasq_support != DNSMASQ_DISABLE)
+      dbus_set_domain_server_ex(reply, 1);
+
     for (i = 0; i < reply->elements; i+= 2) {
-      domain_entry_t *entry = calloc (1, sizeof(domain_entry_t));
+      domain_entry_t *entry;
+
+      entry = calloc (1, sizeof(domain_entry_t));
       strncpy (entry->domain, reply->element[i]->str, DOMAIN_SIZE);
       strncpy (entry->table, reply->element[i+1]->str, IPSET_SIZE);
       entry->domain_len = strlen(entry->domain);
@@ -596,8 +643,6 @@ void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
       HASH_ADD_STR(domains, domain, entry);
       entry->flags = 1;
 
-      if (dnsmasq_support != DNSMASQ_DISABLE)
-        dbus_set_domain_server(entry->domain, 1);
       if (dnsmasq_support != DNSMASQ_ONLY) {
         redisAsyncCommand(c, addDomainCb, entry->table, "SMEMBERS %s", entry->domain);
         redisAsyncCommand(c, addSubDomainCb, entry->table, "KEYS *.%s", entry->domain);
@@ -640,10 +685,10 @@ int main (int argc, char **argv) {
     {"dnsmasq", 0, 0, 'D'}, 
     {"dnsmasq-only", 0, 0, 'd'}, 
     {"help", 0, 0, '?'}, 
-    {"socket", required_argument, 0, 's'}, 
-    {"host", required_argument, 0, 'h'}, 
-    {"port", required_argument, 0, 'p'}, 
     {"ns", required_argument, 0, 'N'},
+    {"host", required_argument, 0, 'H'}, 
+    {"port", required_argument, 0, 'p'}, 
+    {"socket", required_argument, 0, 's'}, 
     {0, 0, 0, 0},
   };
 
@@ -652,27 +697,27 @@ int main (int argc, char **argv) {
 
   signal(SIGPIPE, SIG_IGN);
 
-  while ((opt = getopt_long(argc, argv, "NDdhH:s:p:", longopts, &longindex)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hDdN:H:p:s:", longopts, &longindex)) != -1) {
     switch (opt) {
+      case 'N':
+        nameserver = strdup(optarg);
+        break;
       case 'H':
         redis_host = optarg;
         while (*redis_host==' ')
           redis_host++;
         break;
-      case 's':
-        redis_sock = optarg;
-        break;
       case 'p':
         redis_port = atoi(optarg);
+        break;
+      case 's':
+        redis_sock = optarg;
         break;
       case 'D':
         dnsmasq_support = DNSMASQ_ENABLE;
         break;
       case 'd':
         dnsmasq_support = DNSMASQ_ONLY;
-        break;
-      case 'N':
-        nameserver = strdup(optarg);
         break;
       case 'h':
       case '?':
