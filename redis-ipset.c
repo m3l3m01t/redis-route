@@ -119,51 +119,61 @@ int dbus_init_dnsmasq(void) {
 
 void dbus_set_domain_server_ex(redisReply *redis_reply, int set)
 {
-  int i = 0, j = 0;
+  int i = 0;
   char *str, buf[256];
+  char domain[256];
 
   DBusMessage *msg, *reply;
   DBusMessageIter iter, sub;
   DBusError err;
 
-  while (i < redis_reply->elements) {
-    msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
-        DNSMASQ_PATH, 
-        DNSMASQ_DBUS_NAME, 
-        "SetDomainServers");
+  msg = dbus_message_new_method_call(DNSMASQ_SERVICE, 
+      DNSMASQ_PATH, 
+      DNSMASQ_DBUS_NAME, 
+      "SetDomainServers");
 
-    dbus_message_iter_init_append(msg, &iter);
-    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, DBUS_TYPE_STRING_AS_STRING, &sub);
+  dbus_message_iter_init_append(msg, &iter);
+  dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, DBUS_TYPE_STRING_AS_STRING, &sub);
 
-    str = &buf[0];
+  str = &buf[0];
 
-    for (j = 0; (j < 200) && ((i + j) < redis_reply->elements); j += 2) {
-      snprintf(str, sizeof(buf) - 1, "/%s/%s", redis_reply->element[i + j]->str, set ? nameserver : "");
-      fprintf(stdout,"load %s\n", str);
-      dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &str);
+  fprintf(stdout, "total domain rules %ld\n", redis_reply->elements / 2);
+  for (i = 0; i < redis_reply->elements; i += 2) {
+    int j = 0;
+    while (redis_reply->element[i]->str[j]) {
+      domain[j] = redis_reply->element[i]->str[j];
+      j ++;
+    }
+    if (j == 0)
+      continue;
+
+    if (domain[--j] == '.') {
+      domain[j] = 0;
     }
 
-    i += j;
-
-    dbus_message_iter_close_container(&iter, &sub);
-
-     // send message and get a handle for a reply
-    dbus_error_init(&err);
-    reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 10000, &err);
-    if (dbus_error_is_set (&err)) {
-      fprintf(stderr, "SetDomainServers %s failed\n",err.message);
-    }
-
-    fflush(stdout);
-
-    dbus_connection_flush(dbus_conn);
-
-  // free message
-    if (reply)
-      dbus_message_unref(reply);
-    dbus_message_unref(msg);
-    dbus_error_free(&err);
+    snprintf(buf, sizeof(buf) - 1, "/%s/%s", domain, set ? nameserver : "");
+    fprintf(stdout,"load %d: %s\n", i / 2, buf);
+    dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &str);
   }
+
+  dbus_message_iter_close_container(&iter, &sub);
+
+   // send message and get a handle for a reply
+  dbus_error_init(&err);
+  reply = dbus_connection_send_with_reply_and_block (dbus_conn, msg, 10000, &err);
+  if (dbus_error_is_set (&err)) {
+    fprintf(stderr, "SetDomainServers %s failed\n",err.message);
+  }
+
+  fflush(stdout);
+
+  dbus_connection_flush(dbus_conn);
+
+// free message
+  if (reply)
+    dbus_message_unref(reply);
+  dbus_message_unref(msg);
+  dbus_error_free(&err);
 }
 
 void dbus_set_domain_server(const char *domain, int set) {
@@ -626,7 +636,7 @@ void subCb(redisAsyncContext *c, void *r, void *priv) {
 void loadIpsetCb(redisAsyncContext *c, void *r, void *priv) {
   redisReply *reply = r;
   if (reply == NULL) return;
-  if ( reply->type == REDIS_REPLY_ARRAY && reply->elements > 0 ) {
+  if (reply->type == REDIS_REPLY_ARRAY && reply->elements > 0 ) {
     int i;
     if (dnsmasq_support != DNSMASQ_DISABLE)
       dbus_set_domain_server_ex(reply, 1);
